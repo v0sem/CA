@@ -6,6 +6,8 @@
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+#include <x86intrin.h>
+
 
 static inline void getRGB(uint8_t *im, int width, int height, int nchannels, int x, int y, int *r, int *g, int *b)
 {
@@ -74,12 +76,46 @@ int main(int nargs, char **argv)
 
         gettimeofday(&ini,NULL);
         // RGB to grey scale
-        int r, g, b;
-        for (int i = 0; i < width * height; i++)
+        __m256 coeff = _mm256_setr_ps(0.2989f, 0.5870f, 0.1140f, 0.0f, 0.2989f, 0.5870f, 0.1140f, 0.0f);
+        __m256 tot, tot_temp;
+        __m128i grey;
+        __m256i index = _mm256_setr_epi32(0, 4, 1, 5, 0, 0, 0, 0); // the last 4 indexes dont matter as we discard them
+  
+        for (int i = 0; i<width * height; i+=4)
         {
-            getRGB(rgb_image, width, height, 4, i % width, i / width, &r, &g, &b);
-            grey_image[i] = (int)(0.2989 * r + 0.5870 * g + 0.1140 * b);
+            // Load in 2 vectors high and low
+            __m128i datal = _mm_loadl_epi64((__m128i *)(rgb_image + i * 4));
+            __m128i datah = _mm_loadl_epi64((__m128i *)(rgb_image + i * 4 + 8));
+            
+            // Zero sign extend into 32 bit
+            __m256i datal32 = _mm256_cvtepu8_epi32(datal);
+            __m256i datah32 = _mm256_cvtepu8_epi32(datah);
+            
+            // Convert single precision float
+            __m256 datalf = _mm256_cvtepi32_ps(datal32);
+            __m256 datahf = _mm256_cvtepi32_ps(datah32);
+            
+            // Multiply by our vector to turn to greyscale
+            __m256 datalgrey = _mm256_mul_ps(datalf, coeff);
+            __m256 datahgrey = _mm256_mul_ps(datahf, coeff);
+            
+            // Add the results horizontally
+            tot_temp = _mm256_hadd_ps(datalgrey, datahgrey);
+            tot = _mm256_hadd_ps(tot_temp, tot_temp); //We add the 4 bytes we were missing
+            
+            //Reorder the values to be were they started
+            tot = _mm256_permutevar8x32_ps(tot, index);
+            // Discard the last 4 to be 32 bit
+            grey = _mm_cvtps_epi32(_mm256_extractf128_ps(tot, 0));
+            // Store the values on our output vector
+            uint32_t *storer = (__m128i *)&grey;
+
+            grey_image[i] = storer[0];
+            grey_image[i + 1] = storer[1];
+            grey_image[i + 2] = storer[2];
+            grey_image[i + 3] = storer[3];
         }
+
 
         stbi_write_jpg(grey_image_filename, width, height, 1, grey_image, 10);
         free(rgb_image);
